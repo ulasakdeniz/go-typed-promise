@@ -1,6 +1,6 @@
 # go-typed-promise
 
-A type-safe generic promise library for Go.
+A type-safe generic promise library for Go 1.19.
 
 ## Installation
 
