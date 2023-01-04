@@ -132,6 +132,9 @@ func main() {
 Promises can be chained with `Map` function. It takes a `func(T) (T, error)` as a parameter.
 The function returns a `Promise[T]` which is a new promise created from the result of the previous promise.
 
+Note: Because of Golang generics limitations, you cannot change the type of the promise with `Map`.
+If you want to change the type of the promise, you can use `promise.FromPromise` function.
+
 ```go
 package main
 
@@ -152,7 +155,11 @@ func main() {
 	})
 
 	// Get user, Map returns a new promise that is using tokenPromise to get token
-	userPromise := tokenPromise.Map(func(token string) (string, error) {
+	userPromise := tokenPromise.Map(func(token string, err error) (string, error) {
+		if err != nil {
+            return "", err
+        }
+
 		res, _ := http.Get("https://user-api?token=" + token)
 		user, _ := io.ReadAll(res.Body)
 		return string(user), nil

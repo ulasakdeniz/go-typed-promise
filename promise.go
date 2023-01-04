@@ -108,15 +108,11 @@ func (p *Promise[T]) IsCompleted() bool {
 	return p.isCompleted.Load()
 }
 
-func (p *Promise[T]) Map(f func(T) (T, error)) *Promise[T] {
+// Map maps the result of the promise to a new value.
+func (p *Promise[T]) Map(f func(T, error) (T, error)) *Promise[T] {
 	return create(p.ctx, func() (T, error) {
 		value, err := p.Await()
-		if err != nil {
-			var t T
-			return t, err
-		}
-
-		return f(value)
+		return f(value, err)
 	})
 }
 
@@ -337,14 +333,10 @@ func Any[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[T], erro
 }
 
 // FromPromise maps the result of the given promise to a new promise.
-func FromPromise[T any, R any](promise *Promise[T], mapper func(T) (R, error)) (*Promise[R], error) {
+func FromPromise[T any, R any](promise *Promise[T], mapper func(T, error) (R, error)) (*Promise[R], error) {
 	newPromise, err := New(promise.ctx, func() (R, error) {
 		value, err := promise.Await()
-		if err != nil {
-			var r R
-			return r, err
-		}
-		return mapper(value)
+		return mapper(value, err)
 	})
 	if err != nil {
 		return nil, err

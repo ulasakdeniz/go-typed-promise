@@ -333,7 +333,7 @@ func TestPromise_PipeTo(t *testing.T) {
 	}
 }
 
-func TestPromiseMapper_Map(t *testing.T) {
+func Test_FromPromise(t *testing.T) {
 	type fields struct {
 		runTask      func() (string, error)
 		isSuccess    bool
@@ -375,7 +375,10 @@ func TestPromiseMapper_Map(t *testing.T) {
 			p, err := New(context.TODO(), tt.fields.runTask)
 			assert.NoError(t, err)
 
-			p2, err := FromPromise(p, func(result string) (int, error) {
+			p2, err := FromPromise(p, func(result string, err error) (int, error) {
+				if err != nil {
+					return 0, err
+				}
 				return len(result), nil
 			})
 			assert.NoError(t, err)

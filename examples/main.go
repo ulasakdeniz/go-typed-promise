@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	promise "github.com/ulasakdeniz/go-typed-promise"
+	"github.com/ulasakdeniz/go-typed-promise"
 	"io"
 	"net/http"
 	"time"
