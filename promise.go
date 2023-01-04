@@ -7,18 +7,21 @@ import (
 	"sync/atomic"
 )
 
+const (
+	ContextError = "context error while waiting for promise: %s"
+)
+
 // Promise is a wrapper for a task that will be executed asynchronously.
 type Promise[T any] struct {
-	ctx            context.Context
-	runTask        func() (T, error)
-	executed       *atomic.Bool
-	isCompleted    *atomic.Bool
-	subscriberLock *sync.Mutex
-	subscribers    []subscriber[T]
-	result         T
-	errResult      error
-	valueChan      chan T
-	errChan        chan error
+	ctx         context.Context
+	runTask     func() (T, error)
+	executed    *atomic.Bool
+	isCompleted *atomic.Bool
+	subscribers subscribers[T]
+	result      T
+	errResult   error
+	valueChan   chan T
+	errChan     chan error
 }
 
 type subscriber[T any] struct {
@@ -26,15 +29,30 @@ type subscriber[T any] struct {
 	errChan   chan error
 }
 
+type subscriberSet[T any] map[subscriber[T]]struct{}
+
+type subscribers[T any] struct {
+	set  subscriberSet[T]
+	lock *sync.Mutex
+}
+
+func (s *subscribers[T]) add(subscriber subscriber[T]) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.set[subscriber] = struct{}{}
+}
+
+func (s *subscribers[T]) get() subscriberSet[T] {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	return s.set
+}
+
 func (p *Promise[T]) subscribe(s subscriber[T]) {
 	if p.isCompleted.Load() {
 		p.notify(s)
 	} else {
-		go func() {
-			p.subscriberLock.Lock()
-			defer p.subscriberLock.Unlock()
-			p.subscribers = append(p.subscribers, s)
-		}()
+		p.subscribers.add(s)
 	}
 }
 
@@ -47,9 +65,7 @@ func (p *Promise[T]) notify(s subscriber[T]) {
 }
 
 func (p *Promise[T]) broadcast() {
-	p.subscriberLock.Lock()
-	defer p.subscriberLock.Unlock()
-	for _, s := range p.subscribers {
+	for s := range p.subscribers.get() {
 		p.notify(s)
 	}
 }
@@ -57,7 +73,7 @@ func (p *Promise[T]) broadcast() {
 func (p *Promise[T]) collect() {
 	select {
 	case <-p.ctx.Done():
-		err := fmt.Errorf("context cancelled or timed out while waiting for promise")
+		err := fmt.Errorf(ContextError, p.ctx.Err())
 		p.errResult = err
 	case value := <-p.valueChan:
 		p.result = value
@@ -92,6 +108,18 @@ func (p *Promise[T]) IsCompleted() bool {
 	return p.isCompleted.Load()
 }
 
+func (p *Promise[T]) Map(f func(T) (T, error)) *Promise[T] {
+	return create(p.ctx, func() (T, error) {
+		value, err := p.Await()
+		if err != nil {
+			var t T
+			return t, err
+		}
+
+		return f(value)
+	})
+}
+
 // OnComplete is a callback function that is called when the promise is completed.
 func (p *Promise[T]) OnComplete(success func(T), failure func(error)) {
 	go func() {
@@ -113,8 +141,8 @@ func (p *Promise[T]) OnFailure(failure func(error)) {
 	p.OnComplete(func(T) {}, failure)
 }
 
-// PipeTo sends the result or error of the promise to the given channels.
-func (p *Promise[T]) PipeTo(success chan<- T, failure chan<- error) {
+// ToChannel sends the result or error of the promise to the given channels.
+func (p *Promise[T]) ToChannel(success chan<- T, failure chan<- error) {
 	p.OnComplete(func(value T) {
 		success <- value
 	}, func(err error) {
@@ -186,22 +214,29 @@ func New[T any](ctx context.Context, task func() (T, error)) (*Promise[T], error
 		return nil, err
 	}
 
+	return create(ctx, task), nil
+}
+
+func create[T any](ctx context.Context, task func() (T, error)) *Promise[T] {
 	valueChan := make(chan T)
 	errChan := make(chan error)
 
 	p := &Promise[T]{
-		ctx:            ctx,
-		runTask:        task,
-		executed:       &atomic.Bool{},
-		isCompleted:    &atomic.Bool{},
-		subscriberLock: &sync.Mutex{},
-		valueChan:      valueChan,
-		errChan:        errChan,
+		ctx:         ctx,
+		runTask:     task,
+		executed:    &atomic.Bool{},
+		isCompleted: &atomic.Bool{},
+		subscribers: subscribers[T]{
+			set:  make(subscriberSet[T]),
+			lock: &sync.Mutex{},
+		},
+		valueChan: valueChan,
+		errChan:   errChan,
 	}
 
 	p.execute()
 
-	return p, nil
+	return p
 }
 
 // singleResult is a type to store a single result from a promise while collecting results
@@ -301,8 +336,8 @@ func Any[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[T], erro
 	return p, nil
 }
 
-// Map maps the result of the given promise to a new promise.
-func Map[T any, R any](promise *Promise[T], mapper func(T) (R, error)) (*Promise[R], error) {
+// FromPromise maps the result of the given promise to a new promise.
+func FromPromise[T any, R any](promise *Promise[T], mapper func(T) (R, error)) (*Promise[R], error) {
 	newPromise, err := New(promise.ctx, func() (R, error) {
 		value, err := promise.Await()
 		if err != nil {

@@ -1,4 +1,4 @@
-module github.com/ulasakdeniz/go-promise
+module github.com/ulasakdeniz/go-typed-promise
 
 go 1.19
 

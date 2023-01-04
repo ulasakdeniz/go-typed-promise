@@ -52,7 +52,7 @@ func TestPromise_Await(t *testing.T) {
 					return "test", nil
 				},
 			},
-			expectedError: fmt.Errorf("context cancelled or timed out while waiting for promise"),
+			expectedError: fmt.Errorf("context error while waiting for promise: context canceled"),
 		},
 	}
 
@@ -317,7 +317,7 @@ func TestPromise_PipeTo(t *testing.T) {
 			successChan := make(chan string)
 			failureChan := make(chan error)
 
-			p.PipeTo(successChan, failureChan)
+			p.ToChannel(successChan, failureChan)
 
 			r, err := p.Await()
 
@@ -375,7 +375,7 @@ func TestPromiseMapper_Map(t *testing.T) {
 			p, err := New(context.TODO(), tt.fields.runTask)
 			assert.NoError(t, err)
 
-			p2, err := Map(p, func(result string) (int, error) {
+			p2, err := FromPromise(p, func(result string) (int, error) {
 				return len(result), nil
 			})
 			assert.NoError(t, err)
