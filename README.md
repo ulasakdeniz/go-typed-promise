@@ -2,7 +2,220 @@
 
 A type-safe generic promise library for Go 1.19.
 
+## Why?
+
+![Why](https://media.giphy.com/media/s239QJIh56sRW/giphy.gif)
+
+Go has channels and goroutines, which are great concurrency tools.
+You may not need a promise library at all.
+But introduction of generics makes it possible to play with some more abstractions on top of channels.
+
+One useful abstraction is a promise.
+You have a task that you want to run in a separate goroutine, and you want to reuse the result of the task.
+
+### A use case
+
+Here is our task:
+
+- Make a request to a remote server
+- Then save the result to a database and publish to a queue at the same time
+  (each of these tasks are running in separate goroutines).
+- If one of the operations fail stop the task.
+- The whole operation shouldn't take more than 1 second, so set a timeout.
+
+One might think you wouldn't run http call in a goroutine at all but let's think that you will need to run this flow
+n times in parallel later.
+
+[![](https://mermaid.ink/img/pako:eNp9UbtuwzAM_BVCQIAUiAdn1BCgjtdM7VSrA2PRD8CSXD1SBHH-vZILN01QVFrI04l3JC-sNpIYZ81gPusOrYfXQmgXjq3FsYNe0haq7bvQz9vqbIIFR_ZENgL7av0RKNBTjMtqLdHjEd2ckpb3NXKo8lQjf6hRVJaU8XRD5q8PvCzbTS15SBJTkaxAgsZwHHrXgSLnsKVp__Pi8EQTlEKnu1rFOtGprqnsMVpSM5bOL5Fst7uzwmFR_JMd6UvDHJLcv9R5ThweDLMNU2QV9jLO_yI0gGC-I0WC8RhKajAMXjChr5GKwZuXs64Z9zbQhoUxKi4dMd7g4CI6on4z5paT7L2xh-8dz6u-fgEeRa3U?type=png)](https://mermaid.live/edit#pako:eNp9UbtuwzAM_BVCQIAUiAdn1BCgjtdM7VSrA2PRD8CSXD1SBHH-vZILN01QVFrI04l3JC-sNpIYZ81gPusOrYfXQmgXjq3FsYNe0haq7bvQz9vqbIIFR_ZENgL7av0RKNBTjMtqLdHjEd2ckpb3NXKo8lQjf6hRVJaU8XRD5q8PvCzbTS15SBJTkaxAgsZwHHrXgSLnsKVp__Pi8EQTlEKnu1rFOtGprqnsMVpSM5bOL5Fst7uzwmFR_JMd6UvDHJLcv9R5ThweDLMNU2QV9jLO_yI0gGC-I0WC8RhKajAMXjChr5GKwZuXs64Z9zbQhoUxKi4dMd7g4CI6on4z5paT7L2xh-8dz6u-fgEeRa3U)
+
+Mock functions for our tasks (uncomment the `time.Sleep` to see the timeout works):
+
+```go
+// make http request
+func httpCall() (string, error) {
+    //time.Sleep(2 * time.Second)
+    return "Hello World", nil
+}
+
+// publish message to a queue
+func publishMessage(_ string) (string, error) {
+    //time.Sleep(2 * time.Second)
+    return "success", nil
+}
+
+// save to database
+func saveToDB(_ string) (string, error) {
+    //time.Sleep(2 * time.Second)
+    return "success", nil
+}
+```
+
+#### Implementing with errgroup and promise
+
+<details>
+<summary><b>Click to see implementation with errgroup</b></summary>
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "golang.org/x/sync/errgroup"
+)
+
+func main() {
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	g, ctx := errgroup.WithContext(timeoutCtx)
+
+	httpResChan := make(chan string, 2)
+	publishChan := make(chan string)
+	saveChan := make(chan string)
+
+	// make http request
+	g.Go(func() error {
+		defer close(httpResChan)
+
+		internalResChan := make(chan string)
+		internalErrChan := make(chan error)
+
+		// make http request and send to internal channels so that it can timeout and if result is available sent to other channels
+		go func() {
+			defer close(internalResChan)
+			defer close(internalErrChan)
+
+			res, err := httpCall()
+			if err != nil {
+				internalErrChan <- err
+				return
+			}
+			internalResChan <- res
+		}()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case res := <-internalResChan:
+			httpResChan <- res
+			httpResChan <- res // broadcast
+			return nil
+		case err := <-internalErrChan:
+			return err
+		}
+	})
+
+	// use this function to publish message and save to db, they both receive the http result and pretty much do the same thing
+	runWithHttpRes := func(out chan<- string, task func(string) (string, error)) {
+		// publish message to a queue
+		g.Go(func() error {
+			defer close(out)
+
+			internalResChan := make(chan string)
+			internalErrChan := make(chan error)
+
+			go func() {
+				defer close(internalResChan)
+				defer close(internalErrChan)
+
+				res, err := task(<-httpResChan)
+				if err != nil {
+					internalErrChan <- err
+					return
+				}
+				internalResChan <- res
+			}()
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case res := <-internalResChan:
+				out <- res
+				return nil
+			case err := <-internalErrChan:
+				return err
+			}
+		})
+	}
+
+	// publish message to a queue
+	runWithHttpRes(publishChan, publishMessage)
+	// save to database
+	runWithHttpRes(saveChan, saveToDB)
+
+	results := make([]string, 2)
+
+	// collect results
+	g.Go(func() error {
+		var counter int32
+		for counter < 2 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case publishRes := <-publishChan:
+				counter++
+				results[0] = publishRes
+				publishChan = nil
+			case saveRes := <-saveChan:
+				counter++
+				results[1] = saveRes
+				saveChan = nil
+			}
+		}
+		return nil
+	})
+
+	// wait for all goroutines to finish.
+	if err := g.Wait(); err != nil {
+		fmt.Println(err)
+	} else {
+		fmt.Println(results)
+	}
+}
+```
+</details>
+
+<details>
+<summary><b>Click to see implementation using promise</b></summary>
+
+```go
+func main() {
+    ctx, cancel := context.WithTimeout(context.TODO(), 1*time.Second)
+    defer cancel()
+
+    httpCallPromise, _ := promise.New(ctx, httpCall)
+
+    publishMessagePromise := httpCallPromise.Map(func (data string, httpErr error) (string, error) {
+        if httpErr != nil {
+            return "", httpErr
+        }
+        return publishMessage(data)
+    })
+
+    saveToDBPromise := httpCallPromise.Map(func (data string, httpErr error) (string, error) {
+        if httpErr != nil {
+            return "", httpErr
+        }
+        return saveToDB(data)
+    })
+
+    resultPromise, _ := promise.All(ctx, publishMessagePromise, saveToDBPromise)
+    result, err := resultPromise.Await()
+    if err != nil {
+        fmt.Println(err)
+    }
+
+    fmt.Println(result)
+}
+
+```
+</details>
+
 ## Installation
+
+It is still experimental and not intended to be used in production.
 
 ```bash
 go get github.com/ulasakdeniz/go-typed-promise
@@ -135,85 +348,10 @@ The function returns a `Promise[T]` which is a new promise created from the resu
 Note: Because of Golang generics limitations, you cannot change the type of the promise with `Map`.
 If you want to change the type of the promise, you can use `promise.FromPromise` function.
 
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-	"io"
-    "net/http"
-
-    "github.com/ulasakdeniz/go-typed-promise"
-)
-
-func main() {
-	tokenPromise, _ := promise.New(context.TODO(), func() (string, error) {
-		res, _ := http.Get("https://token-api")
-		token, _ := io.ReadAll(res.Body)
-		return string(token), nil
-	})
-
-	// Get user, Map returns a new promise that is using tokenPromise to get token
-	userPromise := tokenPromise.Map(func(token string, err error) (string, error) {
-		if err != nil {
-            return "", err
-        }
-
-		res, _ := http.Get("https://user-api?token=" + token)
-		user, _ := io.ReadAll(res.Body)
-		return string(user), nil
-	})
-
-	user, err := userPromise.Await()
-	if err != nil {
-		fmt.Println("error", err)
-	}
-
-	fmt.Println("user", user)
-}
-```
-
 ### Using `Promise.All`
 
 `Promise.All` takes a number of promises and returns a promise that resolves when all the promises in the slice are resolved.
 The result of the promise is a slice of the results of the promises.
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"io"
-	"net/http"
-
-	"github.com/ulasakdeniz/go-typed-promise"
-)
-
-func main() {
-	// ignoring errors for simplicity
-	promise1, _ := promise.New(context.TODO(), func() (string, error) {
-		res, _ := http.Get("https://data-api/1") // returns "data1"
-		data, _ := io.ReadAll(res.Body)
-		return string(data), nil
-	})
-
-	promise2, _ := promise.New(context.TODO(), func() (string, error) {
-		res, _ := http.Get("https://data-api/2") // returns "data2"
-		data, _ := io.ReadAll(res.Body)
-		return string(data), nil
-	})
-
-	// Get data in parallel
-	allPromise, _ := promise.All(context.TODO(), promise1, promise2)
-
-	// Await the result
-	result, _ := allPromise.Await()
-
-	fmt.Println("result", result) // prints ["data1", "data2"]
-}
-```
 
 ### Using `Promise.Any`
 
