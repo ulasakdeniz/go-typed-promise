@@ -6,29 +6,37 @@ A type-safe generic promise library for Go 1.19.
 
 ![Why](https://media.giphy.com/media/s239QJIh56sRW/giphy.gif)
 
-Go has channels and goroutines, which are great concurrency tools.
-You may not need a promise library at all.
-But introduction of generics makes it possible to play with some more abstractions on top of channels.
+Go has powerful concurrency tools in the form of channels and goroutines.
+However, the introduction of generics allows for the creation of abstractions, such as the
+Promise pattern, on top of these basic concurrency tools.
 
-One useful abstraction is a promise.
-You have a task that you want to run in a separate goroutine, and you want to reuse the result of the task.
+Promises can be useful when you have a task that you want to run asynchronously and reuse the result of that task.
+They can also make it easier to retrieve data from goroutines.
+Additionally, if still needed, the result of a promise can be sent to a channel using `ToChannel`.
+See [Piping promises to channels](#piping-promises-to-channels) section.
 
 ### A use case
 
-Here is our task:
+Think about this sample task:
 
 - Make a request to a remote server
 - Then save the result to a database and publish to a queue at the same time
-  (each of these tasks are running in separate goroutines).
-- If one of the operations fail stop the task.
-- The whole operation shouldn't take more than 1 second, so set a timeout.
+- Run each operation (http call, saving in db and publishing to queue) in separate goroutines.
+- If any of these operations fail, terminate the task. 
+- Implement a timeout of 1 second for the entire task.
 
-One might think you wouldn't run http call in a goroutine at all but let's think that you will need to run this flow
-n times in parallel later.
+These network operations are made in a goroutine to allow for the possibility of running this flow concurrently multiple
+times in the future.
 
 [![](https://mermaid.ink/img/pako:eNp9UbtuwzAM_BVCQIAUiAdn1BCgjtdM7VSrA2PRD8CSXD1SBHH-vZILN01QVFrI04l3JC-sNpIYZ81gPusOrYfXQmgXjq3FsYNe0haq7bvQz9vqbIIFR_ZENgL7av0RKNBTjMtqLdHjEd2ckpb3NXKo8lQjf6hRVJaU8XRD5q8PvCzbTS15SBJTkaxAgsZwHHrXgSLnsKVp__Pi8EQTlEKnu1rFOtGprqnsMVpSM5bOL5Fst7uzwmFR_JMd6UvDHJLcv9R5ThweDLMNU2QV9jLO_yI0gGC-I0WC8RhKajAMXjChr5GKwZuXs64Z9zbQhoUxKi4dMd7g4CI6on4z5paT7L2xh-8dz6u-fgEeRa3U?type=png)](https://mermaid.live/edit#pako:eNp9UbtuwzAM_BVCQIAUiAdn1BCgjtdM7VSrA2PRD8CSXD1SBHH-vZILN01QVFrI04l3JC-sNpIYZ81gPusOrYfXQmgXjq3FsYNe0haq7bvQz9vqbIIFR_ZENgL7av0RKNBTjMtqLdHjEd2ckpb3NXKo8lQjf6hRVJaU8XRD5q8PvCzbTS15SBJTkaxAgsZwHHrXgSLnsKVp__Pi8EQTlEKnu1rFOtGprqnsMVpSM5bOL5Fst7uzwmFR_JMd6UvDHJLcv9R5ThweDLMNU2QV9jLO_yI0gGC-I0WC8RhKajAMXjChr5GKwZuXs64Z9zbQhoUxKi4dMd7g4CI6on4z5paT7L2xh-8dz6u-fgEeRa3U)
 
-Mock functions for our tasks (uncomment the `time.Sleep` to see the timeout works):
+### Implementing with errgroup and promise
+
+We will see the implementation of the sample task using both the errgroup and promise packages.
+While [golang.org/x/sync/errgroup](https://pkg.go.dev/golang.org/x/sync@v0.1.0/errgroup) package is well-suited for tasks
+of this nature, the promise implementation may offer a simpler and more straightforward approach.
+
+First, let's set the stage with mock functions for our tasks (uncomment the `time.Sleep` to see the timeout works):
 
 ```go
 // make http request
@@ -49,8 +57,6 @@ func saveToDB(_ string) (string, error) {
     return "success", nil
 }
 ```
-
-#### Implementing with errgroup and promise
 
 <details>
 <summary><b>Click to see implementation with errgroup</b></summary>
