@@ -33,7 +33,7 @@ type subscriberSet[T any] map[subscriber[T]]struct{}
 
 type subscribers[T any] struct {
 	set  subscriberSet[T]
-	lock *sync.Mutex
+	lock *sync.RWMutex
 }
 
 func (s *subscribers[T]) add(subscriber subscriber[T]) {
@@ -43,8 +43,8 @@ func (s *subscribers[T]) add(subscriber subscriber[T]) {
 }
 
 func (s *subscribers[T]) get() subscriberSet[T] {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.lock.RLock()
+	defer s.lock.RUnlock()
 	return s.set
 }
 
@@ -57,6 +57,9 @@ func (p *Promise[T]) subscribe(s subscriber[T]) {
 }
 
 func (p *Promise[T]) notify(s subscriber[T]) {
+	defer close(s.valueChan)
+	defer close(s.errChan)
+
 	if p.errResult != nil {
 		s.errChan <- p.errResult
 	} else {
@@ -66,7 +69,7 @@ func (p *Promise[T]) notify(s subscriber[T]) {
 
 func (p *Promise[T]) broadcast() {
 	for s := range p.subscribers.get() {
-		p.notify(s)
+		go p.notify(s)
 	}
 }
 
@@ -91,7 +94,12 @@ func (p *Promise[T]) execute() {
 	}
 	p.executed.Store(true)
 
+	go p.collect()
+
 	go func() {
+		defer close(p.valueChan)
+		defer close(p.errChan)
+
 		value, err := p.runTask()
 		if err != nil {
 			p.errChan <- err
@@ -99,8 +107,6 @@ func (p *Promise[T]) execute() {
 			p.valueChan <- value
 		}
 	}()
-
-	go p.collect()
 }
 
 // IsCompleted returns true if the promise is completed.
@@ -224,7 +230,7 @@ func create[T any](ctx context.Context, task func() (T, error)) *Promise[T] {
 		isCompleted: &atomic.Bool{},
 		subscribers: subscribers[T]{
 			set:  make(subscriberSet[T]),
-			lock: &sync.Mutex{},
+			lock: &sync.RWMutex{},
 		},
 		valueChan: valueChan,
 		errChan:   errChan,
