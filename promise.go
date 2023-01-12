@@ -258,10 +258,15 @@ func All[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[[]T], er
 
 	p, err := New[[]T](ctx, func() ([]T, error) {
 		valueChan := make(chan singleResult[T], numOfPromises)
-		errChan := make(chan error)
+		errChan := make(chan error, numOfPromises)
+
+		wg := sync.WaitGroup{}
+		wg.Add(numOfPromises)
 
 		for i, p := range promises {
 			go func(index int, p *Promise[T]) {
+				defer wg.Done()
+
 				value, err := p.Await()
 				if err != nil {
 					errChan <- err
@@ -271,6 +276,12 @@ func All[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[[]T], er
 				valueChan <- singleResult[T]{index: index, value: value}
 			}(i, p)
 		}
+
+		go func() {
+			wg.Wait()
+			close(valueChan)
+			close(errChan)
+		}()
 
 		results := make([]T, numOfPromises)
 
@@ -296,17 +307,23 @@ func All[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[[]T], er
 // Any returns a promise that is completed with the first successful result of the given promises.
 // If all promises fail, the returned promise is failed with an error.
 func Any[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[T], error) {
-	if len(promises) == 0 {
+	numOfPromises := len(promises)
+	if numOfPromises == 0 {
 		err := fmt.Errorf("no promises provided")
 		return nil, err
 	}
 
 	p, err := New[T](ctx, func() (T, error) {
-		valueChan := make(chan T)
-		errChan := make(chan error)
+		valueChan := make(chan T, numOfPromises)
+		errChan := make(chan error, numOfPromises)
+
+		wg := sync.WaitGroup{}
+		wg.Add(numOfPromises)
 
 		for _, p := range promises {
 			go func(p *Promise[T]) {
+				defer wg.Done()
+
 				value, err := p.Await()
 				if err != nil {
 					errChan <- err
@@ -317,8 +334,14 @@ func Any[T any](ctx context.Context, promises ...*Promise[T]) (*Promise[T], erro
 			}(p)
 		}
 
+		go func() {
+			wg.Wait()
+			close(valueChan)
+			close(errChan)
+		}()
+
 		failedPromises := 0
-		for failedPromises < len(promises) {
+		for failedPromises < numOfPromises {
 			select {
 			case value := <-valueChan:
 				return value, nil

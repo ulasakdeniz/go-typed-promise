@@ -440,6 +440,11 @@ func TestAllWithErrors(t *testing.T) {
 		return "", expectedErr
 	}
 
+	taskWithErrorLate := func() (string, error) {
+		time.Sleep(200 * time.Millisecond)
+		return "", fmt.Errorf("some error")
+	}
+
 	p1, err := New(context.TODO(), task)
 	assert.NoError(t, err)
 
@@ -449,10 +454,10 @@ func TestAllWithErrors(t *testing.T) {
 	p3, err := New(context.TODO(), taskWithError)
 	assert.NoError(t, err)
 
-	p4, err := New(context.TODO(), task)
+	p4, err := New(context.TODO(), taskWithErrorLate)
 	assert.NoError(t, err)
 
-	p5, err := New(context.TODO(), task)
+	p5, err := New(context.TODO(), taskWithErrorLate)
 	assert.NoError(t, err)
 
 	all, err := All(context.TODO(), p1, p2, p3, p4, p5)
